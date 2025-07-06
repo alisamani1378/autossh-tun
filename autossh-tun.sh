@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # autossh-tun.sh – persistent SSH -w tunnel (VPS ➜ IR) + optional DNAT rules
-# Version: 5.1 (English - with Pre-flight SSH Check)
+# Version: 5.2 (English - with Reboot Persistence)
 # Description: This script establishes multiple, parallel layer 3 SSH tunnels
-# and uses iptables to load balance incoming connections across them. It now
-# performs a pre-flight check to ensure SSH connectivity before starting.
+# and creates a systemd service on the remote server to ensure tunnel
+# interfaces persist after a reboot.
 
 set -eo pipefail # Exit on error, but allow pipefails to be checked manually
 
@@ -43,6 +43,13 @@ cleanup_on_error() {
 
     if [[ ${#TUNNELS_CREATED[@]} -gt 0 ]]; then
         warn "◽ Removing configurations for ${#TUNNELS_CREATED[@]} created tunnel(s)..."
+        # Also remove the remote persistence service
+        if [[ "$AUTH_METHOD" == "password" ]]; then
+            sshpass -e $SSH_CMD "sudo systemctl stop persistent-tunnels.service &>/dev/null; sudo systemctl disable persistent-tunnels.service &>/dev/null; sudo rm -f /etc/systemd/system/persistent-tunnels.service /usr/local/bin/create-persistent-tunnels.sh"
+        else
+            $SSH_CMD "sudo systemctl stop persistent-tunnels.service &>/dev/null; sudo systemctl disable persistent-tunnels.service &>/dev/null; sudo rm -f /etc/systemd/system/persistent-tunnels.service /usr/local/bin/create-persistent-tunnels.sh"
+        fi
+
         for i in "${TUNNELS_CREATED[@]}"; do
             remove_existing_config "$i" "cleanup"
         done
@@ -128,21 +135,7 @@ remove_existing_config() {
     iptables -D FORWARD -i "$local_pub_if" -o "$iface" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT &>/dev/null || true
     iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -o "$iface" -j TCPMSS --set-mss $CLAMP_MSS &>/dev/null || true
     
-    # Remove remote components
-    local remote_full_cleanup="
-        export REMOTE_PUB_IF=\$(ip -o -4 route show to default | awk '{print \$5; exit}');
-        sudo ip link del $iface &>/dev/null || true;
-        sudo iptables -D FORWARD -i $iface -o \$REMOTE_PUB_IF -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT &>/dev/null || true;
-        sudo iptables -t nat -D POSTROUTING -o $iface -j MASQUERADE &>/dev/null || true;
-        sudo iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -o $iface -j TCPMSS --set-mss $CLAMP_MSS &>/dev/null || true;
-        sudo netfilter-persistent save &>/dev/null || true;
-    "
-    if [[ "$AUTH_METHOD" == "password" ]]; then
-        sshpass -e $SSH_CMD "$remote_full_cleanup" &>/dev/null || true
-    else
-        $SSH_CMD "$remote_full_cleanup" &>/dev/null || true
-    fi
-
+    # Remote components are removed by the main cleanup function if starting fresh
     if [[ "$mode" == "interactive" ]]; then
         ok "  - Existing configuration for '$iface' removed."
     fi
@@ -178,31 +171,59 @@ while [[ -z "$AUTH_METHOD" ]]; do
     esac
 done
 
-# --- [NEW] Pre-flight SSH Connection Check ---
+# --- Pre-flight SSH Connection Check ---
 ok "\n[Pre-flight Check] Testing SSH connection to remote server..."
-# Use BatchMode to prevent interactive prompts, making it a pure test.
 SSH_CHECK_CMD="ssh -p $SSH_PORT $SSH_EXTRA_ARGS -o BatchMode=yes -o ConnectTimeout=10 $TUN_USER@$IR_HOST"
 
-# The 'exit' command makes the remote shell close immediately after connecting.
 if [[ "$AUTH_METHOD" == "password" ]]; then
     if ! sshpass -e $SSH_CHECK_CMD exit; then
         err "\nخطا: اتصال SSH به سرور مقصد برقرار نشد."
         err "این سرور ایران شامل این تانل نمی‌شود."
-        err "لطفا آدرس IP، نام کاربری، رمز عبور و وضعیت شبکه را بررسی کنید."
-        trap - EXIT ERR SIGINT SIGTERM # Disable cleanup before exiting cleanly
+        trap - EXIT ERR SIGINT SIGTERM
         exit 1
     fi
 else
     if ! $SSH_CHECK_CMD exit; then
         err "\nخطا: اتصال SSH به سرور مقصد برقرار نشد."
         err "این سرور ایران شامل این تانل نمی‌شود."
-        err "لطفا آدرس IP، نام کاربری، مسیر کلید خصوصی و وضعیت شبکه را بررسی کنید."
-        trap - EXIT ERR SIGINT SIGTERM # Disable cleanup before exiting cleanly
+        trap - EXIT ERR SIGINT SIGTERM
         exit 1
     fi
 fi
 ok "  - SSH connection successful. Proceeding with setup..."
-# --- [END NEW] ---
+
+# --- Check for existing persistent tunnel service ---
+SSH_CMD="ssh -p $SSH_PORT $SSH_EXTRA_ARGS -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new $TUN_USER@$IR_HOST"
+if $SSH_CMD "sudo systemctl cat persistent-tunnels.service" &>/dev/null; then
+    warn "\nConflict detected: A persistent tunnel configuration already exists on the remote server."
+    read -rp "Do you want to completely REMOVE the old setup and start fresh? (This is irreversible) [y/n]: " choice
+    if [[ "${choice,,}" == "y" ]];
+    then
+        warn "  - Removing all old configurations..."
+        # This command stops and removes all related services and firewall rules on the remote server.
+        $SSH_CMD "
+            sudo systemctl stop 'autossh-tun*' &>/dev/null
+            sudo systemctl disable 'autossh-tun*' &>/dev/null
+            sudo rm -f /etc/systemd/system/autossh-tun*.service
+            sudo systemctl stop persistent-tunnels.service &>/dev/null
+            sudo systemctl disable persistent-tunnels.service &>/dev/null
+            sudo rm -f /etc/systemd/system/persistent-tunnels.service /usr/local/bin/create-persistent-tunnels.sh
+            sudo systemctl daemon-reload
+            sudo iptables -F; sudo iptables -t nat -F; sudo iptables -t mangle -F;
+            sudo netfilter-persistent save
+        "
+        # Also remove local services
+        systemctl stop 'autossh-tun*' &>/dev/null
+        systemctl disable 'autossh-tun*' &>/dev/null
+        rm -f /etc/systemd/system/autossh-tun*.service
+        systemctl daemon-reload
+        ok "  - Old configurations removed from both servers."
+    else
+        err "Aborting to prevent conflicts. Please manually clean the remote server first."
+        trap - EXIT ERR SIGINT SIGTERM
+        exit 1
+    fi
+fi
 
 
 read -rp "How many parallel tunnels do you want to create? [1-254]: " NUM_TUNNELS
@@ -242,16 +263,48 @@ netfilter-persistent save >/dev/null
 
 # --- Remote Server Initial Setup ---
 ok "[Step 2] Configuring remote server (IR)..."
-REMOTE_SETUP_CMDS="
+# Build the script that will be run by the remote persistence service
+PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\nsudo modprobe tun\n"
+for i in $(seq 0 $((NUM_TUNNELS - 1))); do
+    PERSISTENCE_SCRIPT_CONTENT+="sudo ip tuntap add dev tun$i mode tun user $TUN_USER &>/dev/null || true\n"
+    PERSISTENCE_SCRIPT_CONTENT+="sudo ip link set tun$i up mtu $TUNNEL_MTU\n"
+    PERSISTENCE_SCRIPT_CONTENT+="sudo ip addr add $TUN_NET_BASE.$i.1/30 dev tun$i\n"
+done
+
+# Use a HEREDOC to safely create the multi-line script on the remote server
+REMOTE_SETUP_CMDS=$(cat <<EOF
+# Create and enable the persistence service
+cat << 'EOSERVICE' | sudo tee /etc/systemd/system/persistent-tunnels.service
+[Unit]
+Description=Persistent Tunnel Interface Creator
+After=network.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/create-persistent-tunnels.sh
+RemainAfterExit=true
+[Install]
+WantedBy=multi-user.target
+EOSERVICE
+
+cat << 'EOSCRIPT' | sudo tee /usr/local/bin/create-persistent-tunnels.sh
+${PERSISTENCE_SCRIPT_CONTENT}
+EOSCRIPT
+sudo chmod +x /usr/local/bin/create-persistent-tunnels.sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now persistent-tunnels.service
+
+# Now, configure the rest
 sudo sysctl -w net.ipv4.ip_forward=1
 export REMOTE_PUB_IF=\$(ip -o -4 route show to default | awk '{print \$5; exit}')
 if ! sudo grep -q '^PermitTunnel' /etc/ssh/sshd_config; then
   echo -e '\nPermitTunnel yes\nAllowTcpForwarding yes\nGatewayPorts yes' | sudo tee -a /etc/ssh/sshd_config > /dev/null && sudo systemctl reload sshd
 fi
-"
+EOF
+)
+
 if [[ "$FLUSH_REMOTE_RULES" == "y" ]]; then
     warn "  - Flushing remote firewall rules as requested."
-    REMOTE_SETUP_CMDS+="sudo iptables -F; sudo iptables -t nat -F; sudo iptables -t mangle -F;"
+    REMOTE_SETUP_CMDS+=$'\n'"sudo iptables -F; sudo iptables -t nat -F; sudo iptables -t mangle -F;"
 fi
 
 # Add load balancing rules if ports are specified
@@ -262,31 +315,26 @@ if [[ -n "$FWD_RULES" ]]; then
     done
 fi
 
-# --- Main loop to create each tunnel --- #
+# Add per-tunnel FORWARD and MASQUERADE rules
+for i in $(seq 0 $((NUM_TUNNELS - 1))); do
+    REMOTE_SETUP_CMDS+="
+# Rules for tun$i
+sudo iptables -A FORWARD -i tun$i -o \$REMOTE_PUB_IF -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
+sudo iptables -t nat -A POSTROUTING -o tun$i -j MASQUERADE
+sudo iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -o tun$i -j TCPMSS --set-mss $CLAMP_MSS
+"
+done
+
+# --- Main loop to create each tunnel on the LOCAL machine --- #
 for i in $(seq 0 $((NUM_TUNNELS - 1))); do
     LOCAL_TUN_IFACE="tun$i"
     SERVICE_NAME="autossh-tun$i"
     TUN_NET="$TUN_NET_BASE.$i"
     LOCAL_IP="$TUN_NET.2"
-    REMOTE_IP="$TUN_NET.1"
     
-    ok "\n--- [Tunnel $i] Setting up $LOCAL_TUN_IFACE ---"
+    ok "\n--- [Tunnel $i] Setting up local service for $LOCAL_TUN_IFACE ---"
     
-    # Add per-tunnel commands to the main remote script
-    REMOTE_SETUP_CMDS+="
-# Setup for $LOCAL_TUN_IFACE
-sudo modprobe tun
-sudo ip tuntap add dev $LOCAL_TUN_IFACE mode tun user \$USER
-sudo ip link set $LOCAL_TUN_IFACE up mtu $TUNNEL_MTU
-sudo ip addr add $REMOTE_IP/30 dev $LOCAL_TUN_IFACE
-# Generic FORWARD rule for return traffic
-sudo iptables -A FORWARD -i $LOCAL_TUN_IFACE -o \$REMOTE_PUB_IF -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT
-# Generic MASQUERADE rule for traffic going into the tunnel
-sudo iptables -t nat -A POSTROUTING -o $LOCAL_TUN_IFACE -j MASQUERADE
-# Add MSS clamping for performance
-sudo iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -o $LOCAL_TUN_IFACE -j TCPMSS --set-mss $CLAMP_MSS
-"
-    # Local FORWARD rules for this specific tunnel
+    # Local FORWARD rules
     iptables -A FORWARD -i "$LOCAL_TUN_IFACE" -o "$DEF_IFACE" -j ACCEPT
     iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -o "$LOCAL_TUN_IFACE" -j TCPMSS --set-mss $CLAMP_MSS
     
@@ -326,11 +374,10 @@ done
 
 # --- Finalize and Execute ---
 REMOTE_SETUP_CMDS+=$'\n'"sudo netfilter-persistent save"
-REMOTE_CLEANUP_CMDS="" # Cleanup is now handled by remove_existing_config
+REMOTE_CLEANUP_CMDS="" # Cleanup is now handled by the initial check and full removal
 
 ok "\n[Step 3] Executing all commands on remote server..."
 remote_err_file=$(mktemp)
-SSH_CMD="ssh -p $SSH_PORT $SSH_EXTRA_ARGS -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new $TUN_USER@$IR_HOST"
 
 if [[ "$AUTH_METHOD" == "password" ]]; then
     if ! sshpass -e $SSH_CMD "$REMOTE_SETUP_CMDS" >/dev/null 2>"$remote_err_file"; then
