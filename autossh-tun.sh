@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # autossh-tun.sh – persistent SSH -w tunnel (VPS ➜ IR) + optional DNAT rules
-# Version: 5.6 (English - with Dynamic Latency Health-Check)
+# Version: 5.7 (English - with Full Cleanup Logic)
 # Description: This script establishes multiple, parallel layer 3 SSH tunnels
 # and can install a watchdog service that restarts tunnels if latency
 # significantly degrades compared to its initial baseline.
@@ -237,6 +237,7 @@ if $SSH_CMD "sudo systemctl cat persistent-tunnels.service" &>/dev/null || syste
             sudo systemctl stop persistent-tunnels.service &>/dev/null || true
             sudo systemctl disable persistent-tunnels.service &>/dev/null || true
             sudo rm -f /etc/systemd/system/persistent-tunnels.service /usr/local/bin/create-persistent-tunnels.sh
+            for iface in \$(ip -o link show | awk -F': ' '/tun[0-9]+/{print \$2}'); do sudo ip link del \$iface; done
             sudo systemctl daemon-reload
             sudo iptables -F; sudo iptables -t nat -F; sudo iptables -t mangle -F;
             sudo netfilter-persistent save
@@ -251,6 +252,7 @@ if $SSH_CMD "sudo systemctl cat persistent-tunnels.service" &>/dev/null || syste
         systemctl stop tunnel-health-check.timer &>/dev/null || true
         systemctl disable tunnel-health-check.timer &>/dev/null || true
         rm -f /etc/systemd/system/tunnel-health-check.{service,timer} /usr/local/bin/tunnel-health-check.sh /var/run/tunnel_baseline_rtt.txt
+        for iface in $(ip -o link show | awk -F': ' '/tun[0-9]+/{print $2}'); do ip link del $iface; done
         systemctl daemon-reload
         ok "  - Old configurations removed from both servers."
     else
