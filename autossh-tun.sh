@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # autossh-tun.sh – persistent SSH -w tunnel (VPS ➜ IR) + optional DNAT rules
-# Version: 5.7 (English - with Full Cleanup Logic)
+# Version: 5.8 (English - with Remote Dependency Fix)
 # Description: This script establishes multiple, parallel layer 3 SSH tunnels
 # and can install a watchdog service that restarts tunnels if latency
 # significantly degrades compared to its initial baseline.
@@ -351,6 +351,9 @@ EOSERVICE
 
 # Build the main remote command block
 REMOTE_SETUP_CMDS="
+# [FIX] Install dependencies on remote server first
+sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
+
 # Create and enable the persistence service
 echo '$PERSISTENCE_SERVICE_CONTENT' | sudo tee /etc/systemd/system/persistent-tunnels.service > /dev/null
 echo '$ENCODED_PERSISTENCE_SCRIPT' | base64 -d | sudo tee /usr/local/bin/create-persistent-tunnels.sh > /dev/null
@@ -362,7 +365,7 @@ sudo systemctl enable --now persistent-tunnels.service
 sudo sysctl -w net.ipv4.ip_forward=1
 export REMOTE_PUB_IF=\$(ip -o -4 route show to default | awk '{print \$5; exit}')
 if ! sudo grep -q '^PermitTunnel' /etc/ssh/sshd_config; then
-  echo -e '\nPermitTunnel yes\nAllowTcpForwarding yes\nGatewayPorts yes' | sudo tee -a /etc/ssh/sshd_config > /dev/null && sudo systemctl reload sshd
+  echo -e '\nPermitTunnel yes\nAllowTcpForwarding yes\nGatewayPorts yes' | sudo tee -a /etc/ssh/sshd_config > /dev/null && (sudo systemctl reload sshd || sudo systemctl reload ssh)
 fi
 "
 
