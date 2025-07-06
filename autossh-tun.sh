@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # autossh-tun.sh – persistent SSH -w tunnel (VPS ➜ IR) + optional DNAT rules
-# Version: 5.9 (English - with Robust Remote Dependency Installation)
+# Version: 6.1 (English - with Optional Periodic Restart Service)
 # Description: This script establishes multiple, parallel layer 3 SSH tunnels
-# and can install a watchdog service that restarts tunnels if latency
-# significantly degrades compared to its initial baseline.
+# and can install a timer service to periodically restart all tunnels,
+# ensuring fresh network routes.
 
 set -eo pipefail # Exit on error, but allow pipefails to be checked manually
 
@@ -22,11 +22,9 @@ LAN_CIDR="172.22.22.0/24"
 TUNNEL_MTU=1400
 # MSS value for TCP clamping. Should be MTU - 40.
 CLAMP_MSS=1360
-# --- Health Check Parameters ---
-# Restart tunnels if current latency is this many times greater than the baseline.
-LATENCY_MULTIPLIER="2"
-# How often (in minutes) the health check should run.
-HEALTH_CHECK_INTERVAL_MIN=5
+# --- Periodic Restart Parameters ---
+# How often (in minutes) the tunnels should be forcefully restarted.
+RESTART_INTERVAL_MIN=1
 ################################################################
 
 # --- Global state variables for cleanup --- #
@@ -34,7 +32,7 @@ CLEANUP_REMOTE=false
 CLEANUP_SYSCTL=false
 CLEANUP_LOCAL_NAT=false
 CLEANUP_LOCAL_PERSISTENCE=false
-CLEANUP_HEALTH_CHECK=false
+CLEANUP_RESTARTER=false
 TUNNELS_CREATED=() # Array to track created tunnels for cleanup
 
 # --- Helper functions for colored output --- #
@@ -68,11 +66,11 @@ cleanup_on_error() {
         done
     fi
 
-    if [[ "$CLEANUP_HEALTH_CHECK" = true ]]; then
-        warn "◽ Removing health-check service..."
-        systemctl stop tunnel-health-check.timer &>/dev/null
-        systemctl disable tunnel-health-check.timer &>/dev/null
-        rm -f /etc/systemd/system/tunnel-health-check.{service,timer} /usr/local/bin/tunnel-health-check.sh /var/run/tunnel_baseline_rtt.txt
+    if [[ "$CLEANUP_RESTARTER" = true ]]; then
+        warn "◽ Removing periodic restart service..."
+        systemctl stop tunnel-restarter.timer &>/dev/null
+        systemctl disable tunnel-restarter.timer &>/dev/null
+        rm -f /etc/systemd/system/tunnel-restarter.{service,timer}
     fi
 
     if [[ "$CLEANUP_LOCAL_PERSISTENCE" = true ]]; then
@@ -221,7 +219,7 @@ else
 fi
 ok "  - SSH connection successful. Proceeding with setup..."
 
-# --- [FIX] Install remote dependencies BEFORE checking for conflicts ---
+# --- Install remote dependencies BEFORE checking for conflicts ---
 SSH_CMD="ssh -p $SSH_PORT $SSH_EXTRA_ARGS -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new $TUN_USER@$IR_HOST"
 warn "  - Installing dependencies on remote server (may take a moment)..."
 $SSH_CMD "sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent"
@@ -254,9 +252,9 @@ if $SSH_CMD "sudo systemctl cat persistent-tunnels.service" &>/dev/null || syste
         systemctl stop local-persistent-tunnels.service &>/dev/null || true
         systemctl disable local-persistent-tunnels.service &>/dev/null || true
         rm -f /etc/systemd/system/local-persistent-tunnels.service /usr/local/bin/create-local-persistent-tunnels.sh
-        systemctl stop tunnel-health-check.timer &>/dev/null || true
-        systemctl disable tunnel-health-check.timer &>/dev/null || true
-        rm -f /etc/systemd/system/tunnel-health-check.{service,timer} /usr/local/bin/tunnel-health-check.sh /var/run/tunnel_baseline_rtt.txt
+        systemctl stop tunnel-restarter.timer &>/dev/null || true
+        systemctl disable tunnel-restarter.timer &>/dev/null || true
+        rm -f /etc/systemd/system/tunnel-restarter.{service,timer}
         for iface in $(ip -o link show | awk -F': ' '/tun[0-9]+/{print $2}'); do ip link del $iface; done
         systemctl daemon-reload
         ok "  - Old configurations removed from both servers."
@@ -305,11 +303,11 @@ netfilter-persistent save >/dev/null
 
 # --- Local Persistence Service Setup ---
 ok "[Step 2] Creating local persistence service for tunnel interfaces..."
-LOCAL_PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\nmodprobe tun\n"
+LOCAL_PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\n/sbin/modprobe tun\n"
 for i in $(seq 0 $((NUM_TUNNELS - 1))); do
-    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="ip tuntap add dev tun$i mode tun user root &>/dev/null || true\n"
-    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="ip link set tun$i up mtu $TUNNEL_MTU\n"
-    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="ip addr add $TUN_NET_BASE.$i.2/30 dev tun$i\n"
+    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="/sbin/ip tuntap add dev tun$i mode tun user root &>/dev/null || true\n"
+    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="/sbin/ip link set tun$i up mtu $TUNNEL_MTU\n"
+    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="/sbin/ip addr add $TUN_NET_BASE.$i.2/30 dev tun$i\n"
 done
 echo -e "$LOCAL_PERSISTENCE_SCRIPT_CONTENT" > /usr/local/bin/create-local-persistent-tunnels.sh
 chmod +x /usr/local/bin/create-local-persistent-tunnels.sh
@@ -331,11 +329,11 @@ CLEANUP_LOCAL_PERSISTENCE=true
 # --- Remote Server Initial Setup ---
 ok "[Step 3] Configuring remote server (IR)..."
 # Build the script that will be run by the remote persistence service
-REMOTE_PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\nmodprobe tun\n"
+REMOTE_PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\n/sbin/modprobe tun\n"
 for i in $(seq 0 $((NUM_TUNNELS - 1))); do
-    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="ip tuntap add dev tun$i mode tun user $TUN_USER &>/dev/null || true\n"
-    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="ip link set tun$i up mtu $TUNNEL_MTU\n"
-    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="ip addr add $TUN_NET_BASE.$i.1/30 dev tun$i\n"
+    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="/sbin/ip tuntap add dev tun$i mode tun user $TUN_USER &>/dev/null || true\n"
+    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="/sbin/ip link set tun$i up mtu $TUNNEL_MTU\n"
+    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="/sbin/ip addr add $TUN_NET_BASE.$i.1/30 dev tun$i\n"
 done
 # Base64 encode the script to pass it safely
 ENCODED_PERSISTENCE_SCRIPT=$(echo -e "$REMOTE_PERSISTENCE_SCRIPT_CONTENT" | base64 -w 0)
@@ -491,100 +489,34 @@ echo "To check status, run: systemctl status 'autossh-tun*'"
 echo "------------------------------------------------"
 
 # --- Optional Health Check Service ---
-read -rp $'\n'"Do you want to install an automatic health-check service to restart tunnels on high latency? [y/n]: " choice
+read -rp $'\n'"Do you want to install a periodic restart service for the tunnels? [y/n]: " choice
 if [[ "${choice,,}" == "y" ]]; then
-    ok "\n[Step 6] Installing tunnel health-check service..."
+    ok "\n[Step 6] Installing periodic restart service..."
     
-    HEALTH_CHECK_SCRIPT_CONTENT=$(cat <<EOF
-#!/bin/bash
-# This script checks the tunnel latency against a dynamic baseline.
-
-TARGET_IP="$TUN_NET_BASE.0.1"
-BASELINE_FILE="/var/run/tunnel_baseline_rtt.txt"
-LOG_FILE="/var/log/tunnel-health-check.log"
-PING_COUNT=10
-MULTIPLIER="$LATENCY_MULTIPLIER"
-
-# --- Function to get average RTT ---
-get_avg_rtt() {
-    LANG=C ping -c \$PING_COUNT -W 10 "\$1" | tail -1 | awk -F '/' '{print \$5}'
-}
-
-# --- Main Logic ---
-touch "\$LOG_FILE" # Ensure log file exists
-chmod 644 "\$LOG_FILE"
-
-# Check if a baseline exists
-if [ ! -s "\$BASELINE_FILE" ]; then
-    echo "\$(date): No baseline found. Establishing a new one..." >> "\$LOG_FILE"
-    NEW_BASELINE=\$(get_avg_rtt "\$TARGET_IP")
-    
-    if [[ -n "\$NEW_BASELINE" ]]; then
-        echo "\$NEW_BASELINE" > "\$BASELINE_FILE"
-        echo "\$(date): New baseline established: \${NEW_BASELINE}ms." >> "\$LOG_FILE"
-    else
-        echo "\$(date): Ping to \$TARGET_IP failed while trying to set baseline. Will try again." >> "\$LOG_FILE"
-    fi
-    exit 0
-fi
-
-# A baseline exists, so let's check the current latency
-BASELINE_RTT=\$(cat "\$BASELINE_FILE")
-CURRENT_RTT=\$(get_avg_rtt "\$TARGET_IP")
-
-# Check if ping failed
-if [[ -z "\$CURRENT_RTT" ]]; then
-    echo "\$(date): Ping to \$TARGET_IP failed. Restarting tunnels and clearing baseline." >> "\$LOG_FILE"
-    systemctl restart 'autossh-tun*'
-    rm -f "\$BASELINE_FILE" # Clear baseline so it's re-established after restart
-    exit 0
-fi
-
-# Compare current RTT with the baseline using 'bc'.
-# Use scale=2 for floating point comparison
-THRESHOLD=\$(echo "\$BASELINE_RTT * \$MULTIPLIER" | bc -l)
-
-if (( \$(echo "\$CURRENT_RTT > \$THRESHOLD" | bc -l) )); then
-    echo "\$(date): High latency detected! Current: \${CURRENT_RTT}ms > Threshold: \${THRESHOLD}ms (Baseline: \${BASELINE_RTT}ms). Restarting tunnels." >> "\$LOG_FILE"
-    systemctl restart 'autossh-tun*'
-    rm -f "\$BASELINE_FILE" # Clear baseline so it's re-established after restart
-else
-    echo "\$(date): Latency OK. Current: \${CURRENT_RTT}ms, Baseline: \${BASELINE_RTT}ms." >> "\$LOG_FILE"
-fi
-EOF
-)
-    echo "$HEALTH_CHECK_SCRIPT_CONTENT" > /usr/local/bin/tunnel-health-check.sh
-    chmod +x /usr/local/bin/tunnel-health-check.sh
-
-    cat > /etc/systemd/system/tunnel-health-check.service << 'EOF'
+    cat > /etc/systemd/system/tunnel-restarter.service << 'EOF'
 [Unit]
-Description=Health check for SSH tunnels
+Description=Periodic Restarter for all autossh tunnels
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/tunnel-health-check.sh
+ExecStart=/bin/systemctl restart 'autossh-tun*'
 EOF
 
-    cat > /etc/systemd/system/tunnel-health-check.timer << EOF
+    cat > /etc/systemd/system/tunnel-restarter.timer << EOF
 [Unit]
-Description=Run tunnel health check every $HEALTH_CHECK_INTERVAL_MIN minutes
+Description=Run tunnel restarter every $RESTART_INTERVAL_MIN minute(s)
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=${HEALTH_CHECK_INTERVAL_MIN}min
-Unit=tunnel-health-check.service
+OnUnitActiveSec=${RESTART_INTERVAL_MIN}min
+Unit=tunnel-restarter.service
 [Install]
 WantedBy=timers.target
 EOF
     
     systemctl daemon-reload
-    systemctl enable --now tunnel-health-check.timer
-    CLEANUP_HEALTH_CHECK=true
-    ok "  - Health-check service installed and started."
-    ok "  - Tunnels will be restarted if latency degrades significantly from its baseline."
-    ok "  - Check logs at /var/log/tunnel-health-check.log"
-
-    # Run once to establish the first baseline
-    ok "  - Establishing initial latency baseline..."
-    /usr/local/bin/tunnel-health-check.sh
+    systemctl enable --now tunnel-restarter.timer
+    CLEANUP_RESTARTER=true
+    ok "  - Periodic restart service installed and started."
+    ok "  - All tunnels will be restarted every $RESTART_INTERVAL_MIN minute(s)."
 fi
 
 
