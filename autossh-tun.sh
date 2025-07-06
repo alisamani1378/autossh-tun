@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # autossh-tun.sh – persistent SSH -w tunnel (VPS ➜ IR) + optional DNAT rules
-# Version: 5.8 (English - with Remote Dependency Fix)
+# Version: 5.9 (English - with Robust Remote Dependency Installation)
 # Description: This script establishes multiple, parallel layer 3 SSH tunnels
 # and can install a watchdog service that restarts tunnels if latency
 # significantly degrades compared to its initial baseline.
@@ -325,6 +325,11 @@ CLEANUP_LOCAL_PERSISTENCE=true
 
 # --- Remote Server Initial Setup ---
 ok "[Step 3] Configuring remote server (IR)..."
+# [FIX] Install dependencies on remote server first
+warn "  - Installing dependencies on remote server (may take a moment)..."
+$SSH_CMD "sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent"
+ok "  - Remote dependencies installed."
+
 # Build the script that will be run by the remote persistence service
 REMOTE_PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\nmodprobe tun\n"
 for i in $(seq 0 $((NUM_TUNNELS - 1))); do
@@ -351,9 +356,6 @@ EOSERVICE
 
 # Build the main remote command block
 REMOTE_SETUP_CMDS="
-# [FIX] Install dependencies on remote server first
-sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
-
 # Create and enable the persistence service
 echo '$PERSISTENCE_SERVICE_CONTENT' | sudo tee /etc/systemd/system/persistent-tunnels.service > /dev/null
 echo '$ENCODED_PERSISTENCE_SCRIPT' | base64 -d | sudo tee /usr/local/bin/create-persistent-tunnels.sh > /dev/null
