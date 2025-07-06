@@ -1,13 +1,6 @@
 <div align="center">
 
-  ███╗   ██╗██╗   ██╗██╗  ██╗███████╗████████╗██╗   ██╗███╗   ██╗
-  ████╗  ██║██║   ██║██║  ██║██╔════╝╚══██╔══╝██║   ██║████╗  ██║
-  ██╔██╗ ██║██║   ██║███████║███████╗   ██║   ██║   ██║██╔██╗ ██║
-  ██║╚██╗██║██║   ██║██╔══██║╚════██║   ██║   ██║   ██║██║╚██╗██║
-  ██║ ╚████║╚██████╔╝██║  ██║███████║   ██║   ╚██████╔╝██║ ╚████║
-  ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝
-
-Multi-Tunnel SSH with Automatic Load Balancing
+🚀 Multi-Tunnel SSH with Automatic Load Balancing
 </div>
 
 <p align="center">
@@ -44,7 +37,9 @@ SSH access from the Local Server (VPS) to the Remote Server (IR).
 To run the script, simply execute the following command on your Local Server (VPS). It will download the script from this repository and run it.
 
 ```bash
-bash <(curl -Ls https://raw.githubusercontent.com/alisamani1378/pingtunel/main/setup.sh)
+
+bash <(curl -sSL https://raw.githubusercontent.com/alisamani1378/autossh-tun/main/install.sh)
+
 ```
 
 The script is fully interactive and will guide you through the setup process.
