@@ -221,8 +221,13 @@ else
 fi
 ok "  - SSH connection successful. Proceeding with setup..."
 
-# --- Check for existing persistent tunnel service ---
+# --- [FIX] Install remote dependencies BEFORE checking for conflicts ---
 SSH_CMD="ssh -p $SSH_PORT $SSH_EXTRA_ARGS -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new $TUN_USER@$IR_HOST"
+warn "  - Installing dependencies on remote server (may take a moment)..."
+$SSH_CMD "sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent"
+ok "  - Remote dependencies installed."
+
+# --- Check for existing persistent tunnel service ---
 if $SSH_CMD "sudo systemctl cat persistent-tunnels.service" &>/dev/null || systemctl cat local-persistent-tunnels.service &>/dev/null; then
     warn "\nConflict detected: A persistent tunnel configuration already exists on the local or remote server."
     read -rp "Do you want to completely REMOVE the old setup and start fresh? (This is irreversible) [y/n]: " choice
@@ -325,11 +330,6 @@ CLEANUP_LOCAL_PERSISTENCE=true
 
 # --- Remote Server Initial Setup ---
 ok "[Step 3] Configuring remote server (IR)..."
-# [FIX] Install dependencies on remote server first
-warn "  - Installing dependencies on remote server (may take a moment)..."
-$SSH_CMD "sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent"
-ok "  - Remote dependencies installed."
-
 # Build the script that will be run by the remote persistence service
 REMOTE_PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\nmodprobe tun\n"
 for i in $(seq 0 $((NUM_TUNNELS - 1))); do
