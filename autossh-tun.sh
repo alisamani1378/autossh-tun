@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # autossh-tun.sh – persistent SSH -w tunnel (VPS ➜ IR) + optional DNAT rules
-# Version: 5.4 (English - with Full Reboot Persistence)
+# Version: 5.6 (English - with Dynamic Latency Health-Check)
 # Description: This script establishes multiple, parallel layer 3 SSH tunnels
-# and creates persistence services on BOTH servers to ensure tunnel
-# interfaces survive reboots.
+# and can install a watchdog service that restarts tunnels if latency
+# significantly degrades compared to its initial baseline.
 
 set -eo pipefail # Exit on error, but allow pipefails to be checked manually
 
@@ -22,6 +22,11 @@ LAN_CIDR="172.22.22.0/24"
 TUNNEL_MTU=1400
 # MSS value for TCP clamping. Should be MTU - 40.
 CLAMP_MSS=1360
+# --- Health Check Parameters ---
+# Restart tunnels if current latency is this many times greater than the baseline.
+LATENCY_MULTIPLIER="2"
+# How often (in minutes) the health check should run.
+HEALTH_CHECK_INTERVAL_MIN=5
 ################################################################
 
 # --- Global state variables for cleanup --- #
@@ -29,6 +34,7 @@ CLEANUP_REMOTE=false
 CLEANUP_SYSCTL=false
 CLEANUP_LOCAL_NAT=false
 CLEANUP_LOCAL_PERSISTENCE=false
+CLEANUP_HEALTH_CHECK=false
 TUNNELS_CREATED=() # Array to track created tunnels for cleanup
 
 # --- Helper functions for colored output --- #
@@ -60,6 +66,13 @@ cleanup_on_error() {
         for i in "${TUNNELS_CREATED[@]}"; do
             remove_existing_config "$i" "cleanup"
         done
+    fi
+
+    if [[ "$CLEANUP_HEALTH_CHECK" = true ]]; then
+        warn "◽ Removing health-check service..."
+        systemctl stop tunnel-health-check.timer &>/dev/null
+        systemctl disable tunnel-health-check.timer &>/dev/null
+        rm -f /etc/systemd/system/tunnel-health-check.{service,timer} /usr/local/bin/tunnel-health-check.sh /var/run/tunnel_baseline_rtt.txt
     fi
 
     if [[ "$CLEANUP_LOCAL_PERSISTENCE" = true ]]; then
@@ -235,6 +248,9 @@ if $SSH_CMD "sudo systemctl cat persistent-tunnels.service" &>/dev/null || syste
         systemctl stop local-persistent-tunnels.service &>/dev/null || true
         systemctl disable local-persistent-tunnels.service &>/dev/null || true
         rm -f /etc/systemd/system/local-persistent-tunnels.service /usr/local/bin/create-local-persistent-tunnels.sh
+        systemctl stop tunnel-health-check.timer &>/dev/null || true
+        systemctl disable tunnel-health-check.timer &>/dev/null || true
+        rm -f /etc/systemd/system/tunnel-health-check.{service,timer} /usr/local/bin/tunnel-health-check.sh /var/run/tunnel_baseline_rtt.txt
         systemctl daemon-reload
         ok "  - Old configurations removed from both servers."
     else
@@ -271,7 +287,7 @@ fi
 # --- Initial System-Wide Setup ---
 ok "\n--- Starting Setup for $NUM_TUNNELS Tunnel(s) ---"
 ok "[Step 1] Configuring local server (VPS)..."
-apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y autossh iptables-persistent >/dev/null
+apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y autossh iptables-persistent bc >/dev/null
 sysctl -w net.ipv4.ip_forward=1
 echo "net.ipv4.ip_forward=1" > /etc/sysctl.d/99-autossh-tun.conf
 CLEANUP_SYSCTL=true
@@ -280,7 +296,7 @@ iptables -t nat -C POSTROUTING -s "$LAN_CIDR" -o "$DEF_IFACE" -j MASQUERADE &>/d
 CLEANUP_LOCAL_NAT=true
 netfilter-persistent save >/dev/null
 
-# --- [NEW] Local Persistence Service Setup ---
+# --- Local Persistence Service Setup ---
 ok "[Step 2] Creating local persistence service for tunnel interfaces..."
 LOCAL_PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\nsudo modprobe tun\n"
 for i in $(seq 0 $((NUM_TUNNELS - 1))); do
@@ -466,6 +482,104 @@ echo "------------------------------------------------"
 echo "Load balancing is active for the following ports: ${FWD_RULES:-None}"
 echo "To check status, run: systemctl status 'autossh-tun*'"
 echo "------------------------------------------------"
+
+# --- Optional Health Check Service ---
+read -rp $'\n'"Do you want to install an automatic health-check service to restart tunnels on high latency? [y/n]: " choice
+if [[ "${choice,,}" == "y" ]]; then
+    ok "\n[Step 6] Installing tunnel health-check service..."
+    
+    HEALTH_CHECK_SCRIPT_CONTENT=$(cat <<EOF
+#!/bin/bash
+# This script checks the tunnel latency against a dynamic baseline.
+
+TARGET_IP="$TUN_NET_BASE.0.1"
+BASELINE_FILE="/var/run/tunnel_baseline_rtt.txt"
+LOG_FILE="/var/log/tunnel-health-check.log"
+PING_COUNT=10
+MULTIPLIER="$LATENCY_MULTIPLIER"
+
+# --- Function to get average RTT ---
+get_avg_rtt() {
+    LANG=C ping -c \$PING_COUNT -W 10 "\$1" | tail -1 | awk -F '/' '{print \$5}'
+}
+
+# --- Main Logic ---
+touch "\$LOG_FILE" # Ensure log file exists
+chmod 644 "\$LOG_FILE"
+
+# Check if a baseline exists
+if [ ! -s "\$BASELINE_FILE" ]; then
+    echo "\$(date): No baseline found. Establishing a new one..." >> "\$LOG_FILE"
+    NEW_BASELINE=\$(get_avg_rtt "\$TARGET_IP")
+    
+    if [[ -n "\$NEW_BASELINE" ]]; then
+        echo "\$NEW_BASELINE" > "\$BASELINE_FILE"
+        echo "\$(date): New baseline established: \${NEW_BASELINE}ms." >> "\$LOG_FILE"
+    else
+        echo "\$(date): Ping to \$TARGET_IP failed while trying to set baseline. Will try again." >> "\$LOG_FILE"
+    fi
+    exit 0
+fi
+
+# A baseline exists, so let's check the current latency
+BASELINE_RTT=\$(cat "\$BASELINE_FILE")
+CURRENT_RTT=\$(get_avg_rtt "\$TARGET_IP")
+
+# Check if ping failed
+if [[ -z "\$CURRENT_RTT" ]]; then
+    echo "\$(date): Ping to \$TARGET_IP failed. Restarting tunnels and clearing baseline." >> "\$LOG_FILE"
+    systemctl restart 'autossh-tun*'
+    rm -f "\$BASELINE_FILE" # Clear baseline so it's re-established after restart
+    exit 0
+fi
+
+# Compare current RTT with the baseline using 'bc'.
+# Use scale=2 for floating point comparison
+THRESHOLD=\$(echo "\$BASELINE_RTT * \$MULTIPLIER" | bc -l)
+
+if (( \$(echo "\$CURRENT_RTT > \$THRESHOLD" | bc -l) )); then
+    echo "\$(date): High latency detected! Current: \${CURRENT_RTT}ms > Threshold: \${THRESHOLD}ms (Baseline: \${BASELINE_RTT}ms). Restarting tunnels." >> "\$LOG_FILE"
+    systemctl restart 'autossh-tun*'
+    rm -f "\$BASELINE_FILE" # Clear baseline so it's re-established after restart
+else
+    echo "\$(date): Latency OK. Current: \${CURRENT_RTT}ms, Baseline: \${BASELINE_RTT}ms." >> "\$LOG_FILE"
+fi
+EOF
+)
+    echo "$HEALTH_CHECK_SCRIPT_CONTENT" > /usr/local/bin/tunnel-health-check.sh
+    chmod +x /usr/local/bin/tunnel-health-check.sh
+
+    cat > /etc/systemd/system/tunnel-health-check.service << 'EOF'
+[Unit]
+Description=Health check for SSH tunnels
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/tunnel-health-check.sh
+EOF
+
+    cat > /etc/systemd/system/tunnel-health-check.timer << EOF
+[Unit]
+Description=Run tunnel health check every $HEALTH_CHECK_INTERVAL_MIN minutes
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=${HEALTH_CHECK_INTERVAL_MIN}min
+Unit=tunnel-health-check.service
+[Install]
+WantedBy=timers.target
+EOF
+    
+    systemctl daemon-reload
+    systemctl enable --now tunnel-health-check.timer
+    CLEANUP_HEALTH_CHECK=true
+    ok "  - Health-check service installed and started."
+    ok "  - Tunnels will be restarted if latency degrades significantly from its baseline."
+    ok "  - Check logs at /var/log/tunnel-health-check.log"
+
+    # Run once to establish the first baseline
+    ok "  - Establishing initial latency baseline..."
+    /usr/local/bin/tunnel-health-check.sh
+fi
+
 
 trap - EXIT ERR SIGINT SIGTERM
 exit 0
