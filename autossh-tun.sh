@@ -298,11 +298,11 @@ netfilter-persistent save >/dev/null
 
 # --- Local Persistence Service Setup ---
 ok "[Step 2] Creating local persistence service for tunnel interfaces..."
-LOCAL_PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\nsudo modprobe tun\n"
+LOCAL_PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\nmodprobe tun\n"
 for i in $(seq 0 $((NUM_TUNNELS - 1))); do
-    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="sudo ip tuntap add dev tun$i mode tun user root &>/dev/null || true\n"
-    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="sudo ip link set tun$i up mtu $TUNNEL_MTU\n"
-    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="sudo ip addr add $TUN_NET_BASE.$i.2/30 dev tun$i\n"
+    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="ip tuntap add dev tun$i mode tun user root &>/dev/null || true\n"
+    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="ip link set tun$i up mtu $TUNNEL_MTU\n"
+    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="ip addr add $TUN_NET_BASE.$i.2/30 dev tun$i\n"
 done
 echo -e "$LOCAL_PERSISTENCE_SCRIPT_CONTENT" > /usr/local/bin/create-local-persistent-tunnels.sh
 chmod +x /usr/local/bin/create-local-persistent-tunnels.sh
@@ -324,11 +324,11 @@ CLEANUP_LOCAL_PERSISTENCE=true
 # --- Remote Server Initial Setup ---
 ok "[Step 3] Configuring remote server (IR)..."
 # Build the script that will be run by the remote persistence service
-REMOTE_PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\nsudo modprobe tun\n"
+REMOTE_PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\nmodprobe tun\n"
 for i in $(seq 0 $((NUM_TUNNELS - 1))); do
-    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="sudo ip tuntap add dev tun$i mode tun user $TUN_USER &>/dev/null || true\n"
-    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="sudo ip link set tun$i up mtu $TUNNEL_MTU\n"
-    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="sudo ip addr add $TUN_NET_BASE.$i.1/30 dev tun$i\n"
+    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="ip tuntap add dev tun$i mode tun user $TUN_USER &>/dev/null || true\n"
+    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="ip link set tun$i up mtu $TUNNEL_MTU\n"
+    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="ip addr add $TUN_NET_BASE.$i.1/30 dev tun$i\n"
 done
 # Base64 encode the script to pass it safely
 ENCODED_PERSISTENCE_SCRIPT=$(echo -e "$REMOTE_PERSISTENCE_SCRIPT_CONTENT" | base64 -w 0)
