@@ -4,9 +4,9 @@
 </div>
 
 <p align="center">
-<img alt="Version" src="https://www.google.com/search?q=https://img.shields.io/badge/version-5.1-blue.svg">
-<img alt="License" src="https://www.google.com/search?q=https://img.shields.io/badge/license-MIT-green.svg">
-<img alt="Shell" src="https://www.google.com/search?q=https://img.shields.io/badge/shell-bash-lightgrey.svg">
+<img alt="Version" src="https://img.shields.io/badge/version-5.1-blue.svg">
+<img alt="License" src="https://img.shields.io/badge/license-MIT-green.svg">
+<img alt="Shell" src="https://img.shields.io/badge/shell-bash-lightgrey.svg">
 </p>
 
 This script automates the setup of multiple, parallel, and persistent Layer 3 SSH tunnels between two servers. It leverages autossh for stability and iptables to load balance incoming connections across the tunnels, making it ideal for high-availability and scalable services.
@@ -36,11 +36,7 @@ SSH access from the Local Server (VPS) to the Remote Server (IR).
 🚀 Quick Start: One-Line Execution
 To run the script, simply execute the following command on your Local Server (VPS). It will download the script from this repository and run it.
 
-```bash
-
-bash <(curl -sSL https://raw.githubusercontent.com/alisamani1378/autossh-tun/main/install.sh)
-
-```
+bash -c "$(curl -sSL https://raw.githubusercontent.com/alisamani1378/autossh-tun/main/autossh-tun.sh)"
 
 The script is fully interactive and will guide you through the setup process.
 
