@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # autossh-tun.sh – persistent SSH -w tunnel (VPS ➜ IR) + optional DNAT rules
-# Version: 5.3 (English - Full English Localization & Host Key Fix)
+# Version: 5.3 (English - Final Fix for Remote Script Creation)
 # Description: This script establishes multiple, parallel layer 3 SSH tunnels
 # and creates a systemd service on the remote server to ensure tunnel
 # interfaces persist after a reboot.
@@ -272,11 +272,11 @@ for i in $(seq 0 $((NUM_TUNNELS - 1))); do
     PERSISTENCE_SCRIPT_CONTENT+="sudo ip link set tun$i up mtu $TUNNEL_MTU\n"
     PERSISTENCE_SCRIPT_CONTENT+="sudo ip addr add $TUN_NET_BASE.$i.1/30 dev tun$i\n"
 done
+# Base64 encode the script to pass it safely
+ENCODED_PERSISTENCE_SCRIPT=$(echo -e "$PERSISTENCE_SCRIPT_CONTENT" | base64 -w 0)
 
-# Use a HEREDOC to safely create the multi-line script on the remote server
-REMOTE_SETUP_CMDS=$(cat <<EOF
-# Create and enable the persistence service
-cat << 'EOSERVICE' | sudo tee /etc/systemd/system/persistent-tunnels.service
+# Build the systemd service file content
+PERSISTENCE_SERVICE_CONTENT=$(cat <<'EOSERVICE'
 [Unit]
 Description=Persistent Tunnel Interface Creator
 After=network.target
@@ -287,10 +287,13 @@ RemainAfterExit=true
 [Install]
 WantedBy=multi-user.target
 EOSERVICE
+)
 
-cat << 'EOSCRIPT' | sudo tee /usr/local/bin/create-persistent-tunnels.sh
-${PERSISTENCE_SCRIPT_CONTENT}
-EOSCRIPT
+# Build the main remote command block
+REMOTE_SETUP_CMDS="
+# Create and enable the persistence service
+echo '$PERSISTENCE_SERVICE_CONTENT' | sudo tee /etc/systemd/system/persistent-tunnels.service > /dev/null
+echo '$ENCODED_PERSISTENCE_SCRIPT' | base64 -d | sudo tee /usr/local/bin/create-persistent-tunnels.sh > /dev/null
 sudo chmod +x /usr/local/bin/create-persistent-tunnels.sh
 sudo systemctl daemon-reload
 sudo systemctl enable --now persistent-tunnels.service
@@ -301,8 +304,7 @@ export REMOTE_PUB_IF=\$(ip -o -4 route show to default | awk '{print \$5; exit}'
 if ! sudo grep -q '^PermitTunnel' /etc/ssh/sshd_config; then
   echo -e '\nPermitTunnel yes\nAllowTcpForwarding yes\nGatewayPorts yes' | sudo tee -a /etc/ssh/sshd_config > /dev/null && sudo systemctl reload sshd
 fi
-EOF
-)
+"
 
 if [[ "$FLUSH_REMOTE_RULES" == "y" ]]; then
     warn "  - Flushing remote firewall rules as requested."
