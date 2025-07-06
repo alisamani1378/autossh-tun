@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # autossh-tun.sh – persistent SSH -w tunnel (VPS ➜ IR) + optional DNAT rules
-# Version: 5.3 (English - Final Fix for Remote Script Creation)
+# Version: 5.4 (English - Added Root Check)
 # Description: This script establishes multiple, parallel layer 3 SSH tunnels
 # and creates a systemd service on the remote server to ensure tunnel
 # interfaces persist after a reboot.
 
 set -eo pipefail # Exit on error, but allow pipefails to be checked manually
+
+# --- Root Check ---
+if [[ $EUID -ne 0 ]]; then
+   echo -e "\e[31mError: This script must be run as root. Please use 'sudo'.\e[0m"
+   exit 1
+fi
 
 ### ── Adjustable parameters ──────────────────────────────── ###
 # Base for the /30 network. The script will increment the third octet on retries.
