@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # autossh-tun.sh – persistent SSH -w tunnel (VPS ➜ IR) + optional DNAT rules
-# Version: 5.2 (English - with Reboot Persistence)
+# Version: 5.3 (English - Full English Localization & Host Key Fix)
 # Description: This script establishes multiple, parallel layer 3 SSH tunnels
 # and creates a systemd service on the remote server to ensure tunnel
 # interfaces persist after a reboot.
@@ -173,19 +173,21 @@ done
 
 # --- Pre-flight SSH Connection Check ---
 ok "\n[Pre-flight Check] Testing SSH connection to remote server..."
-SSH_CHECK_CMD="ssh -p $SSH_PORT $SSH_EXTRA_ARGS -o BatchMode=yes -o ConnectTimeout=10 $TUN_USER@$IR_HOST"
+SSH_CHECK_CMD="ssh -p $SSH_PORT $SSH_EXTRA_ARGS -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 $TUN_USER@$IR_HOST"
 
 if [[ "$AUTH_METHOD" == "password" ]]; then
     if ! sshpass -e $SSH_CHECK_CMD exit; then
-        err "\nخطا: اتصال SSH به سرور مقصد برقرار نشد."
-        err "این سرور ایران شامل این تانل نمی‌شود."
+        err "\nError: SSH connection to the remote server failed."
+        err "This remote server is not eligible for this tunnel."
+        err "Please check the IP address, username, password, and network status."
         trap - EXIT ERR SIGINT SIGTERM
         exit 1
     fi
 else
     if ! $SSH_CHECK_CMD exit; then
-        err "\nخطا: اتصال SSH به سرور مقصد برقرار نشد."
-        err "این سرور ایران شامل این تانل نمی‌شود."
+        err "\nError: SSH connection to the remote server failed."
+        err "This remote server is not eligible for this tunnel."
+        err "Please check the IP address, username, private key path, and network status."
         trap - EXIT ERR SIGINT SIGTERM
         exit 1
     fi
