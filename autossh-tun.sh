@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # autossh-tun.sh – persistent SSH -w tunnel (VPS ➜ IR) + optional DNAT rules
-# Version: 5.4 (English - Added Root Check)
+# Version: 5.4 (English - with Full Reboot Persistence)
 # Description: This script establishes multiple, parallel layer 3 SSH tunnels
-# and creates a systemd service on the remote server to ensure tunnel
-# interfaces persist after a reboot.
+# and creates persistence services on BOTH servers to ensure tunnel
+# interfaces survive reboots.
 
 set -eo pipefail # Exit on error, but allow pipefails to be checked manually
 
@@ -28,6 +28,7 @@ CLAMP_MSS=1360
 CLEANUP_REMOTE=false
 CLEANUP_SYSCTL=false
 CLEANUP_LOCAL_NAT=false
+CLEANUP_LOCAL_PERSISTENCE=false
 TUNNELS_CREATED=() # Array to track created tunnels for cleanup
 
 # --- Helper functions for colored output --- #
@@ -59,6 +60,13 @@ cleanup_on_error() {
         for i in "${TUNNELS_CREATED[@]}"; do
             remove_existing_config "$i" "cleanup"
         done
+    fi
+
+    if [[ "$CLEANUP_LOCAL_PERSISTENCE" = true ]]; then
+        warn "◽ Removing local persistence service..."
+        systemctl stop local-persistent-tunnels.service &>/dev/null
+        systemctl disable local-persistent-tunnels.service &>/dev/null
+        rm -f /etc/systemd/system/local-persistent-tunnels.service /usr/local/bin/create-local-persistent-tunnels.sh
     fi
 
     if [[ "$CLEANUP_LOCAL_NAT" = true ]]; then
@@ -202,14 +210,13 @@ ok "  - SSH connection successful. Proceeding with setup..."
 
 # --- Check for existing persistent tunnel service ---
 SSH_CMD="ssh -p $SSH_PORT $SSH_EXTRA_ARGS -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new $TUN_USER@$IR_HOST"
-if $SSH_CMD "sudo systemctl cat persistent-tunnels.service" &>/dev/null; then
-    warn "\nConflict detected: A persistent tunnel configuration already exists on the remote server."
+if $SSH_CMD "sudo systemctl cat persistent-tunnels.service" &>/dev/null || systemctl cat local-persistent-tunnels.service &>/dev/null; then
+    warn "\nConflict detected: A persistent tunnel configuration already exists on the local or remote server."
     read -rp "Do you want to completely REMOVE the old setup and start fresh? (This is irreversible) [y/n]: " choice
     if [[ "${choice,,}" == "y" ]];
     then
         warn "  - Removing all old configurations..."
-        # This command stops and removes all related services and firewall rules on the remote server.
-        # Added '|| true' to prevent script exit on non-existent services.
+        # Remote Cleanup
         $SSH_CMD "
             sudo systemctl stop 'autossh-tun*' &>/dev/null || true
             sudo systemctl disable 'autossh-tun*' &>/dev/null || true
@@ -221,10 +228,13 @@ if $SSH_CMD "sudo systemctl cat persistent-tunnels.service" &>/dev/null; then
             sudo iptables -F; sudo iptables -t nat -F; sudo iptables -t mangle -F;
             sudo netfilter-persistent save
         "
-        # Also remove local services
+        # Local Cleanup
         systemctl stop 'autossh-tun*' &>/dev/null || true
         systemctl disable 'autossh-tun*' &>/dev/null || true
         rm -f /etc/systemd/system/autossh-tun*.service
+        systemctl stop local-persistent-tunnels.service &>/dev/null || true
+        systemctl disable local-persistent-tunnels.service &>/dev/null || true
+        rm -f /etc/systemd/system/local-persistent-tunnels.service /usr/local/bin/create-local-persistent-tunnels.sh
         systemctl daemon-reload
         ok "  - Old configurations removed from both servers."
     else
@@ -270,17 +280,42 @@ iptables -t nat -C POSTROUTING -s "$LAN_CIDR" -o "$DEF_IFACE" -j MASQUERADE &>/d
 CLEANUP_LOCAL_NAT=true
 netfilter-persistent save >/dev/null
 
-# --- Remote Server Initial Setup ---
-ok "[Step 2] Configuring remote server (IR)..."
-# Build the script that will be run by the remote persistence service
-PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\nsudo modprobe tun\n"
+# --- [NEW] Local Persistence Service Setup ---
+ok "[Step 2] Creating local persistence service for tunnel interfaces..."
+LOCAL_PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\nsudo modprobe tun\n"
 for i in $(seq 0 $((NUM_TUNNELS - 1))); do
-    PERSISTENCE_SCRIPT_CONTENT+="sudo ip tuntap add dev tun$i mode tun user $TUN_USER &>/dev/null || true\n"
-    PERSISTENCE_SCRIPT_CONTENT+="sudo ip link set tun$i up mtu $TUNNEL_MTU\n"
-    PERSISTENCE_SCRIPT_CONTENT+="sudo ip addr add $TUN_NET_BASE.$i.1/30 dev tun$i\n"
+    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="sudo ip tuntap add dev tun$i mode tun user root &>/dev/null || true\n"
+    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="sudo ip link set tun$i up mtu $TUNNEL_MTU\n"
+    LOCAL_PERSISTENCE_SCRIPT_CONTENT+="sudo ip addr add $TUN_NET_BASE.$i.2/30 dev tun$i\n"
+done
+echo -e "$LOCAL_PERSISTENCE_SCRIPT_CONTENT" > /usr/local/bin/create-local-persistent-tunnels.sh
+chmod +x /usr/local/bin/create-local-persistent-tunnels.sh
+cat > /etc/systemd/system/local-persistent-tunnels.service << 'EOF'
+[Unit]
+Description=Local Persistent Tunnel Interface Creator
+After=network.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/create-local-persistent-tunnels.sh
+RemainAfterExit=true
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+systemctl enable --now local-persistent-tunnels.service
+CLEANUP_LOCAL_PERSISTENCE=true
+
+# --- Remote Server Initial Setup ---
+ok "[Step 3] Configuring remote server (IR)..."
+# Build the script that will be run by the remote persistence service
+REMOTE_PERSISTENCE_SCRIPT_CONTENT="#!/bin/bash\nsudo modprobe tun\n"
+for i in $(seq 0 $((NUM_TUNNELS - 1))); do
+    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="sudo ip tuntap add dev tun$i mode tun user $TUN_USER &>/dev/null || true\n"
+    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="sudo ip link set tun$i up mtu $TUNNEL_MTU\n"
+    REMOTE_PERSISTENCE_SCRIPT_CONTENT+="sudo ip addr add $TUN_NET_BASE.$i.1/30 dev tun$i\n"
 done
 # Base64 encode the script to pass it safely
-ENCODED_PERSISTENCE_SCRIPT=$(echo -e "$PERSISTENCE_SCRIPT_CONTENT" | base64 -w 0)
+ENCODED_PERSISTENCE_SCRIPT=$(echo -e "$REMOTE_PERSISTENCE_SCRIPT_CONTENT" | base64 -w 0)
 
 # Build the systemd service file content
 PERSISTENCE_SERVICE_CONTENT=$(cat <<'EOSERVICE'
@@ -340,8 +375,6 @@ done
 for i in $(seq 0 $((NUM_TUNNELS - 1))); do
     LOCAL_TUN_IFACE="tun$i"
     SERVICE_NAME="autossh-tun$i"
-    TUN_NET="$TUN_NET_BASE.$i"
-    LOCAL_IP="$TUN_NET.2"
     
     ok "\n--- [Tunnel $i] Setting up local service for $LOCAL_TUN_IFACE ---"
     
@@ -349,11 +382,6 @@ for i in $(seq 0 $((NUM_TUNNELS - 1))); do
     iptables -A FORWARD -i "$LOCAL_TUN_IFACE" -o "$DEF_IFACE" -j ACCEPT
     iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -o "$LOCAL_TUN_IFACE" -j TCPMSS --set-mss $CLAMP_MSS
     
-    # Local Tunnel Interface Setup
-    ip tuntap add dev "$LOCAL_TUN_IFACE" mode tun user root &>/dev/null || true
-    ip link set "$LOCAL_TUN_IFACE" up mtu $TUNNEL_MTU
-    ip addr replace "$LOCAL_IP/30" dev "$LOCAL_TUN_IFACE"
-
     # Systemd Service Setup
     AUTOSSH_CMD="/usr/bin/autossh -M 0 -NT \
 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
@@ -365,8 +393,8 @@ for i in $(seq 0 $((NUM_TUNNELS - 1))); do
     cat > "/etc/systemd/system/$SERVICE_NAME.service" <<EOF
 [Unit]
 Description=Persistent SSH tunnel #$i to $IR_HOST ($LOCAL_TUN_IFACE)
-After=network-online.target
-Wants=network-online.target
+After=network.target local-persistent-tunnels.service
+Wants=network-online.target local-persistent-tunnels.service
 
 [Service]
 Environment="AUTOSSH_GATETIME=0"
@@ -387,7 +415,7 @@ done
 REMOTE_SETUP_CMDS+=$'\n'"sudo netfilter-persistent save"
 REMOTE_CLEANUP_CMDS="" # Cleanup is now handled by the initial check and full removal
 
-ok "\n[Step 3] Executing all commands on remote server..."
+ok "\n[Step 4] Executing all commands on remote server..."
 remote_err_file=$(mktemp)
 
 if [[ "$AUTH_METHOD" == "password" ]]; then
@@ -408,7 +436,7 @@ fi
 rm -f "$remote_err_file"
 ok "   Remote server configured successfully."
 
-ok "\n[Step 4] Starting all local services..."
+ok "\n[Step 5] Starting all local services..."
 systemctl daemon-reload
 for i in "${TUNNELS_CREATED[@]}"; do
     service="autossh-tun$i"
