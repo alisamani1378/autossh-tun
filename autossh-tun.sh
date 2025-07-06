@@ -203,20 +203,21 @@ if $SSH_CMD "sudo systemctl cat persistent-tunnels.service" &>/dev/null; then
     then
         warn "  - Removing all old configurations..."
         # This command stops and removes all related services and firewall rules on the remote server.
+        # Added '|| true' to prevent script exit on non-existent services.
         $SSH_CMD "
-            sudo systemctl stop 'autossh-tun*' &>/dev/null
-            sudo systemctl disable 'autossh-tun*' &>/dev/null
+            sudo systemctl stop 'autossh-tun*' &>/dev/null || true
+            sudo systemctl disable 'autossh-tun*' &>/dev/null || true
             sudo rm -f /etc/systemd/system/autossh-tun*.service
-            sudo systemctl stop persistent-tunnels.service &>/dev/null
-            sudo systemctl disable persistent-tunnels.service &>/dev/null
+            sudo systemctl stop persistent-tunnels.service &>/dev/null || true
+            sudo systemctl disable persistent-tunnels.service &>/dev/null || true
             sudo rm -f /etc/systemd/system/persistent-tunnels.service /usr/local/bin/create-persistent-tunnels.sh
             sudo systemctl daemon-reload
             sudo iptables -F; sudo iptables -t nat -F; sudo iptables -t mangle -F;
             sudo netfilter-persistent save
         "
         # Also remove local services
-        systemctl stop 'autossh-tun*' &>/dev/null
-        systemctl disable 'autossh-tun*' &>/dev/null
+        systemctl stop 'autossh-tun*' &>/dev/null || true
+        systemctl disable 'autossh-tun*' &>/dev/null || true
         rm -f /etc/systemd/system/autossh-tun*.service
         systemctl daemon-reload
         ok "  - Old configurations removed from both servers."
