@@ -1,69 +1,72 @@
-Multi-Tunnel SSH with Load Balancing
-This script automates the setup of multiple, parallel, and persistent Layer 3 SSH tunnels between two servers (a VPS and a destination server, e.g., inside Iran). It leverages autossh for stability and iptables with the statistic module to load balance incoming connections across the tunnels in a round-robin fashion.
+<div align="center">
 
-This architecture is designed for high availability and scalability, making it ideal for managing a large number of users or high-traffic services that need to be routed through a secure, multi-path connection.
+  ███╗   ██╗██╗   ██╗██╗  ██╗███████╗████████╗██╗   ██╗███╗   ██╗
+  ████╗  ██║██║   ██║██║  ██║██╔════╝╚══██╔══╝██║   ██║████╗  ██║
+  ██╔██╗ ██║██║   ██║███████║███████╗   ██║   ██║   ██║██╔██╗ ██║
+  ██║╚██╗██║██║   ██║██╔══██║╚════██║   ██║   ██║   ██║██║╚██╗██║
+  ██║ ╚████║╚██████╔╝██║  ██║███████║   ██║   ╚██████╔╝██║ ╚████║
+  ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚══════╝   ╚═╝    ╚═════╝ ╚═╝  ╚═══╝
 
-Key Features
+Multi-Tunnel SSH with Automatic Load Balancing
+</div>
+
+<p align="center">
+<img alt="Version" src="https://www.google.com/search?q=https://img.shields.io/badge/version-5.1-blue.svg">
+<img alt="License" src="https://www.google.com/search?q=https://img.shields.io/badge/license-MIT-green.svg">
+<img alt="Shell" src="https://www.google.com/search?q=https://img.shields.io/badge/shell-bash-lightgrey.svg">
+</p>
+
+This script automates the setup of multiple, parallel, and persistent Layer 3 SSH tunnels between two servers. It leverages autossh for stability and iptables to load balance incoming connections across the tunnels, making it ideal for high-availability and scalable services.
+
+✨ Key Features
 🚀 Multi-Tunnel Parallelism: Creates a user-defined number of parallel SSH tunnels to scale bandwidth and processing.
 
-⚖️ Round-Robin Load Balancing: Automatically distributes new incoming connections evenly across all active tunnels using iptables.
+⚖️ Round-Robin Load Balancing: Automatically distributes new incoming connections evenly across all active tunnels.
 
-🛡️ High Stability & Auto-Recovery: Uses autossh to monitor and restart tunnels instantly if they drop. Includes optimized SSH KeepAlive settings and smart systemd restart policies.
+🛡️ High Stability & Auto-Recovery: Uses autossh to monitor and restart tunnels instantly if they drop.
 
-⚡️ Performance Optimized:
+⚡️ Performance Optimized: Implements a fast cipher (chacha20-poly1305) and MTU/MSS Clamping to maximize throughput.
 
-Uses a fast, modern cipher (chacha20-poly1305) for high throughput.
+🤖 Interactive & Smart Setup: Performs a pre-flight SSH check and intelligently handles existing configurations.
 
-Implements MTU/MSS Clamping to prevent packet fragmentation and improve TCP performance.
+🧹 Automatic Cleanup: A robust trap mechanism reverts all changes if the script fails, leaving the system clean.
 
-🤖 Interactive & Smart Setup:
+🔥 Flexible Port Forwarding: Forward specific ports, ranges, or even all traffic with a simple keyword.
 
-Performs a pre-flight SSH check to validate credentials before making any changes.
-
-Intelligently detects existing configurations and asks for user permission to overwrite them.
-
-🧹 Automatic Cleanup: A robust trap mechanism ensures that if the script fails at any point, all created interfaces, services, and firewall rules are automatically removed, leaving the system clean.
-
-🔥 Flexible Port Forwarding: Forward specific ports, port ranges, or even all traffic with a simple keyword.
-
-Requirements
+✅ Requirements
 Two servers running a Debian-based OS (e.g., Ubuntu).
-
-Local Server (VPS): The public-facing server where you run this script.
-
-Remote Server (IR): The destination server the tunnels will connect to.
 
 root or sudo access on both servers.
 
-SSH access from the Local Server to the Remote Server (password or key-based).
+SSH access from the Local Server (VPS) to the Remote Server (IR).
 
 🚀 Quick Start: One-Line Execution
 To run the script, simply execute the following command on your Local Server (VPS). It will download the script from this repository and run it.
 
-bash <(curl -sSL https://raw.githubusercontent.com/alisamani1378/autossh-tun/main/install.sh)
+bash <(curl -sSL [https://raw.githubusercontent.com/alisamani1378/autossh-tun/main/autossh-tun.sh](https://raw.githubusercontent.com/alisamani1378/autossh-tun/main/autossh-tun.sh))
 
 The script is fully interactive and will guide you through the setup process.
 
-How It Works
+🛠️ How It Works
 The architecture involves two main components:
 
 Local Server (VPS):
 
-Runs multiple autossh processes, each maintaining a persistent SSH tunnel to the remote server.
+Runs multiple autossh processes, each maintaining a persistent SSH tunnel.
 
-Each tunnel is assigned a virtual network interface (tun0, tun1, etc.).
+Each tunnel gets a virtual tun interface (tun0, tun1, etc.).
 
-Manages firewall rules to allow traffic to flow from the tunnels to the internet.
+Manages firewall rules to route traffic from the tunnels to the internet.
 
 Remote Server (IR):
 
 Accepts the incoming SSH connections.
 
-Uses iptables statistic module to act as a load balancer. It distributes incoming connections from the public internet across the available tunnels.
+Uses iptables statistic module to act as a load balancer, distributing connections across the tunnels.
 
 Uses MASQUERADE to correctly NAT the traffic as it enters the tunnels.
 
-This symmetric, multi-path setup ensures that both CPU load and network traffic are distributed, preventing a single point of failure or performance bottleneck.
+This symmetric, multi-path setup ensures that both CPU load and network traffic are distributed, preventing a single point of failure.
 
 ⚙️ Configuration
 While the script is interactive, you can modify the following parameters at the top of the autossh-tun.sh file for advanced customization:
