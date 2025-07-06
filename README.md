@@ -1,6 +1,6 @@
 <div align="center">
 
-#🚀 Multi-Tunnel SSH with Automatic Load Balancing
+🚀 Multi-Tunnel SSH with Automatic Load Balancing
 </div>
 
 <p align="center">
